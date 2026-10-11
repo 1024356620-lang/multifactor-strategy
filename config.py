@@ -19,11 +19,11 @@ VALID_START = '2023-07-01'
 VALID_END = '2025-10-01'
 
 # 因子列表（与 factor_calc.py 保持一致）
-FACTOR_COLS = ['momentum', 'volatility', 'avg_turn', 'ma_ratio', 'EP']
+FACTOR_COLS = ['reversal', 'volatility', 'avg_turn', 'ma_ratio', 'EP']
 
 # 因子方向：1 表示越大越好，-1 表示越小越好
 FACTOR_DIRECTION = {
-    'momentum': -1,      
+    'reversal': 1,      
     'volatility': -1,    
     'avg_turn': -1,      
     'ma_ratio': -1,      
@@ -32,7 +32,7 @@ FACTOR_DIRECTION = {
 
 # 因子合成权重（可调整）
 FACTOR_WEIGHTS = {
-    'momentum': 0.24,
+    'reversal': 0.24,
     'volatility': 0.28,
     'avg_turn': 0.24,
     'ma_ratio': 0.39,

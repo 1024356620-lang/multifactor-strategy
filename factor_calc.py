@@ -16,7 +16,7 @@ def calc_factors_at_date(df, end_date):
     sub = sub.copy()
     sub['ret'] = sub['close'].pct_change()
     
-    momentum = sub['close'].iloc[-1] / sub['close'].iloc[-20] - 1
+    reversal = -(sub['close'].iloc[-1] / sub['close'].iloc[-20] - 1)
     volatility = sub['ret'].iloc[-20:].std() * np.sqrt(252)
     avg_turn = sub['turn'].iloc[-20:].mean()
     
@@ -24,11 +24,9 @@ def calc_factors_at_date(df, end_date):
     ma20 = sub['close'].rolling(20).mean().iloc[-1]
     ma_ratio = ma5 / ma20 - 1 if ma20 > 0 else 0
     
-    highest = sub['high'].iloc[-20:].max()
-    price_position = sub['close'].iloc[-1] / highest if highest > 0 else 0
     
     return {
-        'momentum': momentum,
+        'reversal': reversal,
         'volatility': volatility,
         'avg_turn': avg_turn,
         'ma_ratio': ma_ratio,
