@@ -13,6 +13,11 @@ from ic_analysis import calc_ic, summarize_ic
 from backtest import calc_period_return, composite_score, performance_summary
 from fundamental import load_fundamentals
 from valuation import calc_valuation_factors
+from industry import load_industry, neutralize_by_industry
+
+# ========== 开关 ==========
+DIAG_MODE = False                # True 时输出单因子分层和 G5 诊断
+USE_INDUSTRY_NEUTRAL = False     # True 时启用行业中性化（实测会降夏普，默认关闭）
 
 # 确保 results 目录存在
 os.makedirs('results', exist_ok=True)
@@ -33,7 +38,7 @@ def layered_returns(factor_df, future_rets, n_groups=5):
     return df.groupby('group')['future_ret'].mean()
 
 
-# ================= 新增：单因子分层诊断 =================
+# ================= 单因子分层诊断 =================
 def single_factor_layered(factor_df, future_rets, n_groups=5):
     """
     对每个因子单独分层，看单调性。
@@ -70,7 +75,7 @@ def check_monotonic(series):
     return '非单调'
 
 
-# ================= 新增：G5 倒挂诊断 =================
+# ================= G5 倒挂诊断 =================
 def diagnose_g5(factor_processed, scored_df, future_rets):
     """
     诊断 G5 为什么倒挂：
@@ -81,7 +86,6 @@ def diagnose_g5(factor_processed, scored_df, future_rets):
     print("G5 倒挂诊断")
     print("-" * 50)
 
-    # 1. 各分组的因子均值
     df = factor_processed.copy()
     df['score'] = composite_score(df)
     df['future_ret'] = df['symbol'].map(future_rets)
@@ -98,7 +102,6 @@ def diagnose_g5(factor_processed, scored_df, future_rets):
     print("\n各分组因子均值：")
     print(factor_mean.to_string())
 
-    # 2. G5 收益分布
     g5 = df[df['group'] == 'G5']
     print(f"\nG5 收益分布（n={len(g5)}）：")
     print(f"  均值: {g5['future_ret'].mean():.4f}")
@@ -107,7 +110,6 @@ def diagnose_g5(factor_processed, scored_df, future_rets):
     print(f"  最大: {g5['future_ret'].max():.4f}")
     print(f"  最小: {g5['future_ret'].min():.4f}")
 
-    # 3. G5 里收益最差的 5 只
     worst = g5.nsmallest(5, 'future_ret')[['symbol', 'future_ret'] + FACTOR_COLS]
     print(f"\nG5 中收益最差的 5 只：")
     print(worst.to_string(index=False))
@@ -117,6 +119,19 @@ def main():
     # ========== 1. 数据 ==========
     klines = load_all_data(force_refresh=False)
     print(f"股票数: {len(klines)}")
+
+    # ========== 1.1 行业分类（仅在中性化开启时加载）==========
+    industry_df = None
+    if USE_INDUSTRY_NEUTRAL:
+        print("\n加载行业分类...")
+        try:
+            industry_df = load_industry(force_refresh=False)
+            print(f"行业数: {industry_df['industry'].nunique()}")
+        except Exception as e:
+            print(f"行业分类加载失败: {e}，跳过中性化")
+            industry_df = None
+    else:
+        print("\n行业中性化已关闭（USE_INDUSTRY_NEUTRAL=False）")
 
     # ========== 2. 基本面数据 ==========
     print("\n加载基本面数据...")
@@ -146,12 +161,12 @@ def main():
     ic_records = []
     ls_records = []
     layer_records = []
-    single_factor_records = []   # 新增：单因子分层记录
+    single_factor_records = []
     nav_gross = [1.0]
     nav_net = [1.0]
 
     first_valid_done = False
-    diag_done = False            # 新增：只诊断第一期
+    diag_done = False
 
     for i, rb_date in enumerate(rebalance_dates):
         next_date = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else None
@@ -183,6 +198,12 @@ def main():
         if factor_processed is None or factor_processed.empty:
             print(f"{rb_date.date()} 预处理后为空，跳过")
             continue
+
+        # 4.3.1 行业中性化（开关控制）
+        if USE_INDUSTRY_NEUTRAL and industry_df is not None:
+            factor_processed = neutralize_by_industry(
+                factor_processed, industry_df, FACTOR_COLS
+            )
 
         # 4.4 下期收益
         future_rets = calc_period_return(klines, rb_date, next_date)
@@ -230,12 +251,22 @@ def main():
             layer_dict['date'] = rb_date
             layer_records.append(layer_dict)
 
-        # 4.8 单因子分层（新增）
-        sf = single_factor_layered(factor_processed, future_rets, n_groups=5)
-        if not sf.empty:
-            sf = sf.reset_index().rename(columns={'index': 'factor'})
-            sf['date'] = rb_date
-            single_factor_records.append(sf)
+        # 4.8 单因子分层（诊断模式才跑）
+        if DIAG_MODE:
+            sf = single_factor_layered(factor_processed, future_rets, n_groups=5)
+            if not sf.empty:
+                sf = sf.reset_index().rename(columns={'index': 'factor'})
+                sf['date'] = rb_date
+                single_factor_records.append(sf)
+
+        # 4.9 G5 倒挂诊断（诊断模式才跑，只做第一期）
+        if DIAG_MODE and not diag_done and len(scored) >= 25:
+            diag_done = True
+            diagnose_g5(factor_processed, scored, future_rets)
+
+        if (i + 1) % 10 == 0:
+            print(f"  已完成 {i+1}/{len(rebalance_dates)} 期")
+
     # ========== 5. 汇总 ==========
     print("\n" + "=" * 50)
     print("因子 IC 汇总")
@@ -259,18 +290,17 @@ def main():
             print(f"  单调性: {check_monotonic(layer_mean)}")
         layer_df.to_csv('results/layered_returns.csv')
 
-    # ========== 新增：单因子分层汇总 ==========
-    print("\n" + "=" * 50)
-    print("单因子分层回测（每个因子单独分组）")
-    print("=" * 50)
-    if single_factor_records:
+    # ========== 单因子分层汇总（诊断模式才输出）==========
+    if DIAG_MODE and single_factor_records:
+        print("\n" + "=" * 50)
+        print("单因子分层回测（每个因子单独分组）")
+        print("=" * 50)
         sf_df = pd.concat(single_factor_records, ignore_index=True)
         sf_mean = sf_df.groupby('factor')[
             [f'G{i+1}' for i in range(5)]
         ].mean()
         print(sf_mean.to_string())
 
-        # 每个因子的单调性
         print("\n各因子单调性：")
         for factor in sf_mean.index:
             mono = check_monotonic(sf_mean.loc[factor])
