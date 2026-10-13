@@ -236,14 +236,6 @@ def main():
             sf = sf.reset_index().rename(columns={'index': 'factor'})
             sf['date'] = rb_date
             single_factor_records.append(sf)
-        # 4.9 G5 倒挂诊断（新增，只做第一期）
-        if not diag_done and len(scored) >= 25:
-            diag_done = True
-            diagnose_g5(factor_processed, scored, future_rets)
-
-        if (i + 1) % 10 == 0:
-            print(f"  已完成 {i+1}/{len(rebalance_dates)} 期")
-
     # ========== 5. 汇总 ==========
     print("\n" + "=" * 50)
     print("因子 IC 汇总")
