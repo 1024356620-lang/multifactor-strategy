@@ -17,10 +17,30 @@ from industry import load_industry, neutralize_by_industry
 
 # ========== 开关 ==========
 DIAG_MODE = False                # True 时输出单因子分层和 G5 诊断
-USE_INDUSTRY_NEUTRAL = False     # True 时启用行业中性化（实测会降夏普，默认关闭）
+USE_INDUSTRY_NEUTRAL = False     # 行业中性化（实测降夏普，默认关闭）
+USE_VOL_TARGET = False            # 波动率目标（实测降夏普，默认关闭）
+VOL_TARGET = 0.12                # 目标年化波动
+VOL_WINDOW = 8                   # 滚动窗口（期数）
+VOL_MAX_POS = 1.5                # 仓位上限
 
 # 确保 results 目录存在
 os.makedirs('results', exist_ok=True)
+
+
+def vol_target_position(ls_history, target_vol=VOL_TARGET, periods_per_year=PERIODS_PER_YEAR,
+                        window=VOL_WINDOW, max_pos=VOL_MAX_POS):
+    """
+    根据历史多空收益的滚动波动，算下期仓位系数。
+    只用历史数据，避免未来函数。
+    """
+    if len(ls_history) < 4:
+        return 1.0
+    recent = pd.Series(ls_history[-window:])
+    realized_vol = recent.std(ddof=1) * np.sqrt(periods_per_year)
+    if realized_vol <= 0 or np.isnan(realized_vol):
+        return 1.0
+    scale = target_vol / realized_vol
+    return float(np.clip(scale, 0.0, max_pos))
 
 
 def layered_returns(factor_df, future_rets, n_groups=5):
@@ -40,10 +60,6 @@ def layered_returns(factor_df, future_rets, n_groups=5):
 
 # ================= 单因子分层诊断 =================
 def single_factor_layered(factor_df, future_rets, n_groups=5):
-    """
-    对每个因子单独分层，看单调性。
-    返回 DataFrame：index=因子名，columns=G1..G5
-    """
     results = {}
     df = factor_df.copy()
     df['future_ret'] = df['symbol'].map(future_rets)
@@ -64,7 +80,6 @@ def single_factor_layered(factor_df, future_rets, n_groups=5):
 
 
 def check_monotonic(series):
-    """判断分层收益是否单调，返回 '递增' / '递减' / '非单调'"""
     vals = series.dropna().values
     if len(vals) < 2:
         return '数据不足'
@@ -75,13 +90,7 @@ def check_monotonic(series):
     return '非单调'
 
 
-# ================= G5 倒挂诊断 =================
 def diagnose_g5(factor_processed, scored_df, future_rets):
-    """
-    诊断 G5 为什么倒挂：
-    1. G5 vs G4 各因子均值对比
-    2. G5 的收益分布（看是否被个别股票拖累）
-    """
     print("\n" + "-" * 50)
     print("G5 倒挂诊断")
     print("-" * 50)
@@ -120,7 +129,7 @@ def main():
     klines = load_all_data(force_refresh=False)
     print(f"股票数: {len(klines)}")
 
-    # ========== 1.1 行业分类（仅在中性化开启时加载）==========
+    # ========== 1.1 行业分类 ==========
     industry_df = None
     if USE_INDUSTRY_NEUTRAL:
         print("\n加载行业分类...")
@@ -164,6 +173,7 @@ def main():
     single_factor_records = []
     nav_gross = [1.0]
     nav_net = [1.0]
+    pos_records = []          # 记录每期仓位
 
     first_valid_done = False
     diag_done = False
@@ -234,17 +244,28 @@ def main():
         n = max(1, int(len(scored) * 0.25))
         long_ret = scored.head(n)['future_ret'].mean()
         short_ret = scored.tail(n)['future_ret'].mean()
-        ls_gross = long_ret - short_ret
-        ls_net = ls_gross - 2 * TRANSACTION_COST
+        ls_gross_raw = long_ret - short_ret
+
+        # 4.6.1 波动率目标（用历史，不含当期）
+        if USE_VOL_TARGET:
+            pos = vol_target_position([r['ls_gross'] for r in ls_records])
+        else:
+            pos = 1.0
+
+        ls_gross = ls_gross_raw * pos
+        ls_net = ls_gross - 2 * TRANSACTION_COST * pos
 
         ls_records.append({
             'date': rb_date, 'long': long_ret, 'short': short_ret,
+            'ls_gross_raw': ls_gross_raw,
             'ls_gross': ls_gross, 'ls_net': ls_net,
+            'pos': pos,
         })
+        pos_records.append({'date': rb_date, 'pos': pos, 'ls_gross_raw': ls_gross_raw})
         nav_gross.append(nav_gross[-1] * (1 + ls_gross))
         nav_net.append(nav_net[-1] * (1 + ls_net))
 
-        # 4.7 分层回测
+        # 4.7 分层回测（用原始因子，不受仓位影响）
         layer = layered_returns(factor_processed, future_rets, n_groups=5)
         if layer is not None:
             layer_dict = layer.to_dict()
@@ -290,7 +311,7 @@ def main():
             print(f"  单调性: {check_monotonic(layer_mean)}")
         layer_df.to_csv('results/layered_returns.csv')
 
-    # ========== 单因子分层汇总（诊断模式才输出）==========
+    # ========== 单因子分层汇总 ==========
     if DIAG_MODE and single_factor_records:
         print("\n" + "=" * 50)
         print("单因子分层回测（每个因子单独分组）")
@@ -308,6 +329,18 @@ def main():
             print(f"  {factor:12s}: {mono:6s}  G5-G1 = {spread:+.4f}")
 
         sf_df.to_csv('results/single_factor_layered.csv', index=False)
+
+    # ========== 仓位记录 ==========
+    if USE_VOL_TARGET and pos_records:
+        print("\n" + "=" * 50)
+        print("波动率目标仓位")
+        print("=" * 50)
+        pos_df = pd.DataFrame(pos_records).set_index('date')
+        print(f"  平均仓位: {pos_df['pos'].mean():.3f}")
+        print(f"  最小仓位: {pos_df['pos'].min():.3f}")
+        print(f"  最大仓位: {pos_df['pos'].max():.3f}")
+        print(f"  仓位标准差: {pos_df['pos'].std():.3f}")
+        pos_df.to_csv('results/positions.csv')
 
     print("\n" + "=" * 50)
     print("多空组合绩效")
