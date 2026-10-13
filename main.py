@@ -10,7 +10,10 @@ from data_loader import load_all_data
 from factor_calc import build_cross_section
 from preprocess import preprocess_factors
 from ic_analysis import calc_ic, summarize_ic
-from backtest import calc_period_return, composite_score, performance_summary
+from backtest import calc_period_return
+from src.signal.combine import composite_score
+from src.backtest.metrics import performance_summary
+from src.evaluation.layered import layered_returns, single_factor_layered, check_monotonic
 from fundamental import load_fundamentals
 from valuation import calc_valuation_factors
 from industry import load_industry, neutralize_by_industry
@@ -42,52 +45,6 @@ def vol_target_position(ls_history, target_vol=VOL_TARGET, periods_per_year=PERI
     scale = target_vol / realized_vol
     return float(np.clip(scale, 0.0, max_pos))
 
-
-def layered_returns(factor_df, future_rets, n_groups=5):
-    df = factor_df.copy()
-    df['score'] = composite_score(df)
-    df['future_ret'] = df['symbol'].map(future_rets)
-    df = df.dropna(subset=['future_ret']).sort_values('score', ascending=False)
-    if len(df) < n_groups * 5:
-        return None
-    df['group'] = pd.qcut(
-        df['score'].rank(method='first'),
-        n_groups,
-        labels=[f'G{i+1}' for i in range(n_groups)]
-    )
-    return df.groupby('group')['future_ret'].mean()
-
-
-# ================= 单因子分层诊断 =================
-def single_factor_layered(factor_df, future_rets, n_groups=5):
-    results = {}
-    df = factor_df.copy()
-    df['future_ret'] = df['symbol'].map(future_rets)
-    df = df.dropna(subset=['future_ret'])
-
-    for col in FACTOR_COLS:
-        if col not in df.columns:
-            continue
-        sub = df[[col, 'future_ret']].dropna().copy()
-        if len(sub) < n_groups * 5:
-            continue
-        sub['group'] = pd.qcut(
-            sub[col].rank(method='first'), n_groups,
-            labels=[f'G{i+1}' for i in range(n_groups)]
-        )
-        results[col] = sub.groupby('group')['future_ret'].mean()
-    return pd.DataFrame(results).T
-
-
-def check_monotonic(series):
-    vals = series.dropna().values
-    if len(vals) < 2:
-        return '数据不足'
-    if all(vals[i] <= vals[i+1] for i in range(len(vals)-1)):
-        return '递增'
-    if all(vals[i] >= vals[i+1] for i in range(len(vals)-1)):
-        return '递减'
-    return '非单调'
 
 
 def diagnose_g5(factor_processed, scored_df, future_rets):
