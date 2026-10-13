@@ -8,10 +8,11 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # 回测参数
 START_DATE = '2020-01-01'
 END_DATE = '2025-10-01'
-STOCK_POOL_SIZE = 300          # 先取前50只测试，可改为300
-REBALANCE_FREQ = 'M'          # 月度调仓
-MIN_STOCKS_PER_PERIOD = 20    # 每期最少有效股票数
-FACTOR_MIN_HISTORY = 21       # 因子计算最少历史天数
+STOCK_POOL_SIZE = 300
+REBALANCE_FREQ = 'Q'          # 季度调仓
+PERIODS_PER_YEAR = 4          # 年化因子：季度=4，月度=12，日频=252
+MIN_STOCKS_PER_PERIOD = 20
+FACTOR_MIN_HISTORY = 21
 # config.py 追加
 TRAIN_START = '2020-01-01'
 TRAIN_END = '2023-06-30'
@@ -24,19 +25,19 @@ FACTOR_COLS = ['reversal', 'volatility', 'avg_turn', 'ma_ratio', 'EP']
 # 因子方向：1 表示越大越好，-1 表示越小越好
 FACTOR_DIRECTION = {
     'reversal': 1,      
-    'volatility': -1,    
-    'avg_turn': -1,      
+    'volatility': 1,    
+    'avg_turn': 1,      
     'ma_ratio': -1,      
     'EP': 1,             
 }
 
 # 因子合成权重（可调整）
 FACTOR_WEIGHTS = {
-    'reversal': 0.24,
-    'volatility': 0.28,
-    'avg_turn': 0.24,
-    'ma_ratio': 0.39,
-    'EP': 0.15,
+    'reversal': 0.4,
+    'volatility': 0.0,
+    'avg_turn': 0.0,
+    'ma_ratio': 0.6,
+    'EP': 0.0,
 }
 
 # 交易成本（单边）

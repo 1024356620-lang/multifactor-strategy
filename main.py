@@ -2,7 +2,10 @@
 import os
 import pandas as pd
 import numpy as np
-from config import MIN_STOCKS_PER_PERIOD, TRANSACTION_COST, FACTOR_COLS, FACTOR_WEIGHTS
+from config import (
+    MIN_STOCKS_PER_PERIOD, TRANSACTION_COST, FACTOR_COLS,
+    FACTOR_WEIGHTS, PERIODS_PER_YEAR,
+)
 from data_loader import load_all_data
 from factor_calc import build_cross_section
 from preprocess import preprocess_factors
@@ -28,6 +31,86 @@ def layered_returns(factor_df, future_rets, n_groups=5):
         labels=[f'G{i+1}' for i in range(n_groups)]
     )
     return df.groupby('group')['future_ret'].mean()
+
+
+# ================= 新增：单因子分层诊断 =================
+def single_factor_layered(factor_df, future_rets, n_groups=5):
+    """
+    对每个因子单独分层，看单调性。
+    返回 DataFrame：index=因子名，columns=G1..G5
+    """
+    results = {}
+    df = factor_df.copy()
+    df['future_ret'] = df['symbol'].map(future_rets)
+    df = df.dropna(subset=['future_ret'])
+
+    for col in FACTOR_COLS:
+        if col not in df.columns:
+            continue
+        sub = df[[col, 'future_ret']].dropna().copy()
+        if len(sub) < n_groups * 5:
+            continue
+        sub['group'] = pd.qcut(
+            sub[col].rank(method='first'), n_groups,
+            labels=[f'G{i+1}' for i in range(n_groups)]
+        )
+        results[col] = sub.groupby('group')['future_ret'].mean()
+    return pd.DataFrame(results).T
+
+
+def check_monotonic(series):
+    """判断分层收益是否单调，返回 '递增' / '递减' / '非单调'"""
+    vals = series.dropna().values
+    if len(vals) < 2:
+        return '数据不足'
+    if all(vals[i] <= vals[i+1] for i in range(len(vals)-1)):
+        return '递增'
+    if all(vals[i] >= vals[i+1] for i in range(len(vals)-1)):
+        return '递减'
+    return '非单调'
+
+
+# ================= 新增：G5 倒挂诊断 =================
+def diagnose_g5(factor_processed, scored_df, future_rets):
+    """
+    诊断 G5 为什么倒挂：
+    1. G5 vs G4 各因子均值对比
+    2. G5 的收益分布（看是否被个别股票拖累）
+    """
+    print("\n" + "-" * 50)
+    print("G5 倒挂诊断")
+    print("-" * 50)
+
+    # 1. 各分组的因子均值
+    df = factor_processed.copy()
+    df['score'] = composite_score(df)
+    df['future_ret'] = df['symbol'].map(future_rets)
+    df = df.dropna(subset=['future_ret'])
+    if len(df) < 25:
+        print("  样本不足，跳过")
+        return
+
+    df['group'] = pd.qcut(
+        df['score'].rank(method='first'), 5,
+        labels=[f'G{i+1}' for i in range(5)]
+    )
+    factor_mean = df.groupby('group')[FACTOR_COLS].mean()
+    print("\n各分组因子均值：")
+    print(factor_mean.to_string())
+
+    # 2. G5 收益分布
+    g5 = df[df['group'] == 'G5']
+    print(f"\nG5 收益分布（n={len(g5)}）：")
+    print(f"  均值: {g5['future_ret'].mean():.4f}")
+    print(f"  中位数: {g5['future_ret'].median():.4f}")
+    print(f"  标准差: {g5['future_ret'].std():.4f}")
+    print(f"  最大: {g5['future_ret'].max():.4f}")
+    print(f"  最小: {g5['future_ret'].min():.4f}")
+
+    # 3. G5 里收益最差的 5 只
+    worst = g5.nsmallest(5, 'future_ret')[['symbol', 'future_ret'] + FACTOR_COLS]
+    print(f"\nG5 中收益最差的 5 只：")
+    print(worst.to_string(index=False))
 
 
 def main():
@@ -63,10 +146,12 @@ def main():
     ic_records = []
     ls_records = []
     layer_records = []
+    single_factor_records = []   # 新增：单因子分层记录
     nav_gross = [1.0]
     nav_net = [1.0]
 
     first_valid_done = False
+    diag_done = False            # 新增：只诊断第一期
 
     for i, rb_date in enumerate(rebalance_dates):
         next_date = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else None
@@ -145,6 +230,17 @@ def main():
             layer_dict['date'] = rb_date
             layer_records.append(layer_dict)
 
+        # 4.8 单因子分层（新增）
+        sf = single_factor_layered(factor_processed, future_rets, n_groups=5)
+        if not sf.empty:
+            sf = sf.reset_index().rename(columns={'index': 'factor'})
+            sf['date'] = rb_date
+            single_factor_records.append(sf)
+        # 4.9 G5 倒挂诊断（新增，只做第一期）
+        if not diag_done and len(scored) >= 25:
+            diag_done = True
+            diagnose_g5(factor_processed, scored, future_rets)
+
         if (i + 1) % 10 == 0:
             print(f"  已完成 {i+1}/{len(rebalance_dates)} 期")
 
@@ -168,13 +264,28 @@ def main():
         g_cols = [f'G{i+1}' for i in range(5)]
         vals = [layer_mean.get(c, np.nan) for c in g_cols]
         if all(pd.notna(v) for v in vals):
-            if all(vals[j] <= vals[j+1] for j in range(4)):
-                print("  单调性: 单调递增 ✓")
-            elif all(vals[j] >= vals[j+1] for j in range(4)):
-                print("  单调性: 单调递减 ✗")
-            else:
-                print("  单调性: 非单调")
+            print(f"  单调性: {check_monotonic(layer_mean)}")
         layer_df.to_csv('results/layered_returns.csv')
+
+    # ========== 新增：单因子分层汇总 ==========
+    print("\n" + "=" * 50)
+    print("单因子分层回测（每个因子单独分组）")
+    print("=" * 50)
+    if single_factor_records:
+        sf_df = pd.concat(single_factor_records, ignore_index=True)
+        sf_mean = sf_df.groupby('factor')[
+            [f'G{i+1}' for i in range(5)]
+        ].mean()
+        print(sf_mean.to_string())
+
+        # 每个因子的单调性
+        print("\n各因子单调性：")
+        for factor in sf_mean.index:
+            mono = check_monotonic(sf_mean.loc[factor])
+            spread = sf_mean.loc[factor, 'G5'] - sf_mean.loc[factor, 'G1']
+            print(f"  {factor:12s}: {mono:6s}  G5-G1 = {spread:+.4f}")
+
+        sf_df.to_csv('results/single_factor_layered.csv', index=False)
 
     print("\n" + "=" * 50)
     print("多空组合绩效")
