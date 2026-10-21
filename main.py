@@ -20,7 +20,7 @@ from industry import load_industry, neutralize_by_industry
 
 # ========== 实验开关 ==========
 DIAG_MODE = False                # 是否开启单因子分层及极端值诊断
-RUN_PHASE = 'all'                # 运行阶段：'train', 'valid', 'all'
+RUN_PHASE = 'valid'                # 运行阶段：'train', 'valid', 'all'
 USE_INDUSTRY_NEUTRAL = False     # 行业中性化（实测削弱 alpha，默认关闭）
 
 os.makedirs('results', exist_ok=True)
@@ -88,28 +88,48 @@ def main():
     else:
         print(f"基本面数据行数: {len(fin_df)}")
 
-    # 2. 生成调仓日（季频）及区间截断
+    # 2. 生成统一交易日历和调仓区间
     all_dates = sorted(set().union(*[set(df['date']) for df in klines.values()]))
     all_dates = pd.to_datetime(all_dates)
     quarter_groups = pd.Series(all_dates).dt.to_period('Q')
     
-    rebalance_dates = [
+    signal_dates = [
         all_dates[quarter_groups[quarter_groups == p].index[0]]
         for p in quarter_groups.drop_duplicates()
     ]
-    # 确保最后一期有完整收益，剔除最后一天
-    rebalance_dates = [d for d in rebalance_dates if d < all_dates[-1]]
+    signal_dates = [d for d in signal_dates if d < all_dates[-1]]
 
-    if RUN_PHASE == 'train':
-        rebalance_dates = [d for d in rebalance_dates if pd.to_datetime(TRAIN_START) <= d <= pd.to_datetime(TRAIN_END)]
-        print(f"*** 当前处于：训练期 ({TRAIN_START} ~ {TRAIN_END}) ***")
-    elif RUN_PHASE == 'valid':
-        rebalance_dates = [d for d in rebalance_dates if pd.to_datetime(VALID_START) <= d <= pd.to_datetime(VALID_END)]
-        print(f"*** 当前处于：验证期 ({VALID_START} ~ {VALID_END}) ***")
+    # 构建持仓区间：信号日 -> 下个交易日(入场) -> 下个信号日(退出)
+    intervals = []
+    for i, sig_date in enumerate(signal_dates[:-1]):
+        next_sig_date = signal_dates[i+1]
+        
+        future_dates = all_dates[all_dates > sig_date]
+        if len(future_dates) == 0:
+            continue
+        entry_date = future_dates[0]
+        
+        # 用“入场日”来判断该区间属于训练集还是验证集，保证首尾相接且不重叠
+        phase = 'all'
+        if pd.to_datetime(TRAIN_START) <= entry_date <= pd.to_datetime(TRAIN_END):
+            phase = 'train'
+        elif pd.to_datetime(VALID_START) <= entry_date <= pd.to_datetime(VALID_END):
+            phase = 'valid'
+            
+        intervals.append({
+            'signal_date': sig_date,
+            'entry_date': entry_date,
+            'exit_date': next_sig_date,
+            'phase': phase
+        })
+
+    if RUN_PHASE in ['train', 'valid']:
+        intervals = [x for x in intervals if x['phase'] == RUN_PHASE]
+        print(f"*** 当前处于：{RUN_PHASE.upper()} 阶段 ***")
     else:
         print(f"*** 当前处于：全样本期 ***")
         
-    print(f"调仓次数: {len(rebalance_dates)}")
+    print(f"调仓次数: {len(intervals)}")
 
     # 3. 核心回测循环
     ic_records, ls_records, layer_records, single_factor_records = [], [], [], []
@@ -118,12 +138,11 @@ def main():
     first_valid_done = False
     diag_done = False
 
-    for i, rb_date in enumerate(rebalance_dates):
-        next_date = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else None
-        if next_date is None:
-            break
+    for interval in intervals:
+        rb_date = interval['signal_date']
+        entry_date = interval['entry_date']
+        exit_date = interval['exit_date']
 
-        # 截面因子计算与合并
         factor_df = build_cross_section(klines, rb_date)
         if factor_df is None or len(factor_df) < MIN_STOCKS_PER_PERIOD:
             continue
@@ -141,7 +160,6 @@ def main():
             factor_df['EP'] = 0.0
         factor_df['EP'] = factor_df['EP'].fillna(factor_df['EP'].median())
 
-        # 因子预处理与中性化
         factor_processed = preprocess_factors(factor_df)
         if factor_processed is None or factor_processed.empty:
             continue
@@ -151,8 +169,7 @@ def main():
                 factor_processed, industry_df, FACTOR_COLS
             )
 
-        # 收益与 IC 计算
-        future_rets = calc_period_return(klines, rb_date, next_date)
+        future_rets = calc_period_return(klines, rb_date, entry_date, exit_date)
         temp = factor_processed.copy()
         temp['future_ret'] = temp['symbol'].map(future_rets)
         valid = temp.dropna(subset=['future_ret'])
@@ -162,28 +179,29 @@ def main():
 
         if not first_valid_done:
             first_valid_done = True
-            print(f"\n第一期有效 @ {rb_date.date()}, 样本数 {len(valid)}")
+            print(f"\n第一期有效 @ 信号日 {rb_date.date()} / 入场日 {entry_date.date()}, 有效样本数 {len(valid)}")
 
         ic_dict = calc_ic(valid)
         ic_dict['date'] = rb_date
         ic_records.append(ic_dict)
 
-        # 选股与多空收益计算 (防止未来函数：先选股，再取收益)
+        # 选股与多空收益计算（严格处理缺失权重）
         scored = factor_processed.copy()
         scored['score'] = composite_score(scored)
         
         scored = scored.sort_values('score', ascending=False)
         n = max(1, int(len(scored) * 0.25))
+        
         long_symbols = scored.head(n)['symbol'].tolist()
         short_symbols = scored.tail(n)['symbol'].tolist()
         
-        scored['future_ret'] = scored['symbol'].map(future_rets)
+        # 获取收益，不 dropna，以便按股票数量 n 均摊权重
+        long_rets = scored[scored['symbol'].isin(long_symbols)]['symbol'].map(future_rets)
+        short_rets = scored[scored['symbol'].isin(short_symbols)]['symbol'].map(future_rets)
         
-        long_ret = scored[scored['symbol'].isin(long_symbols)]['future_ret'].dropna().mean()
-        short_ret = scored[scored['symbol'].isin(short_symbols)]['future_ret'].dropna().mean()
-        
-        if pd.isna(long_ret) or pd.isna(short_ret):
-            continue
+        # 停牌（收益为 NaN）视为现金留存（收益为 0），防止权重虚高
+        long_ret = long_rets.fillna(0).mean()
+        short_ret = short_rets.fillna(0).mean()
             
         ls_gross = long_ret - short_ret
         ls_net = ls_gross - 2 * TRANSACTION_COST
@@ -215,7 +233,7 @@ def main():
                 diagnose_g5(factor_processed, scored, future_rets)
 
         if (i + 1) % 10 == 0:
-            print(f"  已完成 {i+1}/{len(rebalance_dates)} 期")
+            print(f"  已完成 {i+1}/{len(intervals)} 期")
 
     # 4. 结果汇总与导出
     print("\n" + "=" * 50)
