@@ -18,29 +18,36 @@ def calc_period_return(klines, rb_date, entry_date, exit_date):
     exit_date = pd.to_datetime(exit_date)
     
     for sym, df in klines.items():
-        # 确保股票在产生信号前有历史数据
         if not (df['date'] <= rb_date).any():
             continue
             
-        # 严格判定入场日：若当天停牌，视为未成交
+        # 1. 严格判定入场日：若当天停牌，视为未成交
         entry_row = df[df['date'] == entry_date]
-        if entry_row.empty:
+        if entry_row.empty or pd.isna(entry_row['open'].iloc[0]):
             rets[sym] = float('nan')
             continue
             
         open_t1 = entry_row['open'].iloc[0]
+        if open_t1 <= 0:
+            rets[sym] = float('nan')
+            continue
         
-        # 寻找退出日及之前最后一个有效收盘价
+        # 2. 获取退出日及之前的子集
         exit_sub = df[(df['date'] >= entry_date) & (df['date'] <= exit_date)]
         if exit_sub.empty:
             rets[sym] = float('nan')
             continue
             
-        close_end = exit_sub['close'].iloc[-1]
+        # 3. 剥离无效的 NaN 收盘价
+        valid_closes = exit_sub['close'].dropna()
+        valid_closes = valid_closes[valid_closes > 0]
         
-        if open_t1 > 0:
-            rets[sym] = close_end / open_t1 - 1
-        else:
+        if valid_closes.empty:
+            # 买入后到期末连一个有效收盘价都没有（极度异常数据），记 0 或不计入
             rets[sym] = float('nan')
+            continue
+            
+        close_end = valid_closes.iloc[-1]
+        rets[sym] = close_end / open_t1 - 1
             
     return rets

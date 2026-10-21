@@ -114,10 +114,11 @@ def main():
             continue
         entry_date = future_dates[0]
         
+        # 用信号日来判断归属
         phase = 'all'
-        if pd.to_datetime(TRAIN_START) <= entry_date <= pd.to_datetime(TRAIN_END):
+        if pd.to_datetime(TRAIN_START) <= sig_date <= pd.to_datetime(TRAIN_END):
             phase = 'train'
-        elif pd.to_datetime(VALID_START) <= entry_date <= pd.to_datetime(VALID_END):
+        elif pd.to_datetime(VALID_START) <= sig_date <= pd.to_datetime(VALID_END):
             phase = 'valid'
             
         intervals.append({
