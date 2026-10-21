@@ -1,4 +1,4 @@
-# metrics.py
+# src/backtest/metrics.py
 import pandas as pd
 import numpy as np
 from config import PERIODS_PER_YEAR
@@ -21,27 +21,36 @@ def performance_summary(nav, ls_series, periods_per_year=PERIODS_PER_YEAR):
     if n == 0:
         return {'错误': '无有效样本'}
 
+    # 1. 净值相关指标
     cum_ret = nav.iloc[-1] - 1
-    ann_ret = nav.iloc[-1] ** (periods_per_year / n) - 1
+    ann_ret = nav.iloc[-1] ** (periods_per_year / n) - 1 # 几何年化收益 (CAGR)
+    max_dd = (nav / nav.cummax() - 1).min()
 
+    # 2. 收益与波动相关指标（算术平均）
+    mean_ret = ls.mean()
     period_vol = ls.std(ddof=1)
     ann_vol = period_vol * np.sqrt(periods_per_year)
 
-    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
-
+    # 3. 严格口径的夏普比率 (算术均值 / 标准差 * sqrt(N))
+    # 此处假设无风险利率为 0
     if period_vol > 0:
-        t_stat = ls.mean() / (period_vol / np.sqrt(n))
+        sharpe = (mean_ret / period_vol) * np.sqrt(periods_per_year)
+    else:
+        sharpe = 0.0
+
+    # 4. t 统计量
+    if period_vol > 0:
+        t_stat = mean_ret / (period_vol / np.sqrt(n))
     else:
         t_stat = 0.0
 
-    max_dd = (nav / nav.cummax() - 1).min()
     win_rate = (ls > 0).mean()
 
     return {
         '累计收益': f"{cum_ret:.2%}",
         '年化收益': f"{ann_ret:.2%}",
         '年化波动': f"{ann_vol:.2%}",
-        '夏普比率': f"{sharpe:.2f}",
+        '夏普比率': f"{sharpe:.2f}",  # 标准算术夏普
         't值': f"{t_stat:.2f}",
         '样本期数': n,
         '年化因子': periods_per_year,

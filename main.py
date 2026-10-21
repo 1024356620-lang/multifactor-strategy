@@ -20,7 +20,7 @@ from industry import load_industry, neutralize_by_industry
 
 # ========== 实验开关 ==========
 DIAG_MODE = False                # 是否开启单因子分层及极端值诊断
-RUN_PHASE = 'valid'                # 运行阶段：'train', 'valid', 'all'
+RUN_PHASE = 'all'                # 运行阶段：'train', 'valid', 'all'
 USE_INDUSTRY_NEUTRAL = False     # 行业中性化（实测削弱 alpha，默认关闭）
 
 os.makedirs('results', exist_ok=True)
@@ -99,17 +99,21 @@ def main():
     ]
     signal_dates = [d for d in signal_dates if d < all_dates[-1]]
 
-    # 构建持仓区间：信号日 -> 下个交易日(入场) -> 下个信号日(退出)
+    # 构建持仓区间
     intervals = []
-    for i, sig_date in enumerate(signal_dates[:-1]):
-        next_sig_date = signal_dates[i+1]
+    for i, sig_date in enumerate(signal_dates):
+        # 判断是不是最后一个信号日
+        if i == len(signal_dates) - 1:
+            # 最后一个信号日，退市日取数据里的最后一天
+            next_sig_date = all_dates[-1]
+        else:
+            next_sig_date = signal_dates[i+1]
         
         future_dates = all_dates[all_dates > sig_date]
         if len(future_dates) == 0:
             continue
         entry_date = future_dates[0]
         
-        # 用“入场日”来判断该区间属于训练集还是验证集，保证首尾相接且不重叠
         phase = 'all'
         if pd.to_datetime(TRAIN_START) <= entry_date <= pd.to_datetime(TRAIN_END):
             phase = 'train'
@@ -170,36 +174,35 @@ def main():
             )
 
         future_rets = calc_period_return(klines, rb_date, entry_date, exit_date)
+
+        # IC 计算
         temp = factor_processed.copy()
         temp['future_ret'] = temp['symbol'].map(future_rets)
         valid = temp.dropna(subset=['future_ret'])
         
-        if len(valid) < MIN_STOCKS_PER_PERIOD:
-            continue
+        if len(valid) >= MIN_STOCKS_PER_PERIOD:
+            if not first_valid_done:
+                first_valid_done = True
+                print(f"\n第一期有效 @ 信号日 {rb_date.date()} / 入场日 {entry_date.date()}, 有效样本数 {len(valid)}")
 
-        if not first_valid_done:
-            first_valid_done = True
-            print(f"\n第一期有效 @ 信号日 {rb_date.date()} / 入场日 {entry_date.date()}, 有效样本数 {len(valid)}")
+            ic_dict = calc_ic(valid)
+            ic_dict['date'] = rb_date
+            ic_records.append(ic_dict)
 
-        ic_dict = calc_ic(valid)
-        ic_dict['date'] = rb_date
-        ic_records.append(ic_dict)
-
-        # 选股与多空收益计算（严格处理缺失权重）
+        # 选股
         scored = factor_processed.copy()
         scored['score'] = composite_score(scored)
-        
         scored = scored.sort_values('score', ascending=False)
         n = max(1, int(len(scored) * 0.25))
         
         long_symbols = scored.head(n)['symbol'].tolist()
         short_symbols = scored.tail(n)['symbol'].tolist()
         
-        # 获取收益，不 dropna，以便按股票数量 n 均摊权重
+        # 获取收益（不 dropna，区分 NaN 原因）
         long_rets = scored[scored['symbol'].isin(long_symbols)]['symbol'].map(future_rets)
         short_rets = scored[scored['symbol'].isin(short_symbols)]['symbol'].map(future_rets)
         
-        # 停牌（收益为 NaN）视为现金留存（收益为 0），防止权重虚高
+        # 如果某只股票在 entry_date 停牌（NaN），则该部分资金留作现金
         long_ret = long_rets.fillna(0).mean()
         short_ret = short_rets.fillna(0).mean()
             
