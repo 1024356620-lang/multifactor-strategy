@@ -88,10 +88,16 @@ class Ledger:
         if not self.rows:
             return pd.DataFrame()
         df = pd.DataFrame(self.rows)
+        
+        # 严格拦截缺估值
+        n_missing = int((df["status"] == STATUS_NO_VALUATION).sum())
+        if n_missing:
+            raise ValueError(f"致命错误：发现 {n_missing} 条缺估值持仓")
+
         trades = pd.DataFrame(self.trades) if self.trades else pd.DataFrame()
         out = []
         for sd, g in df.groupby("signal_date"):
-            # 注意：如果某只股票 no_valuation，它的 pnl_contrib 是 NaN，sum() 会跳过
+            # 此时可以安全地使用 sum()，因为已经确保没有 NaN 了
             gross = g["pnl_contrib"].sum()
             t = trades[trades["signal_date"] == sd] if not trades.empty else pd.DataFrame()
             cost = (t["commission"].sum() + t["stamp_tax"].sum() + t["slippage"].sum()) if not t.empty else 0.0
@@ -100,11 +106,11 @@ class Ledger:
                 "signal_date": sd, "gross_pnl": gross, "total_cost": cost,
                 "net_pnl": gross - cost,
                 "n_positions": len(g),
-                "n_no_valuation": (g["status"] == STATUS_NO_VALUATION).sum(),
+                "n_no_valuation": n_missing,
                 "n_unfilled": (g["status"] == STATUS_UNFILLED_SUSPENDED).sum(),
             })
         return pd.DataFrame(out)
-
+    
     def dump(self):
         pd.DataFrame(self.rows).to_csv(f"{LEDGER_DIR}/holdings.csv", index=False)
         pd.DataFrame(self.trades).to_csv(f"{LEDGER_DIR}/trades.csv", index=False)
