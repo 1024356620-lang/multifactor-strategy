@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 from config import (
     MIN_STOCKS_PER_PERIOD, TRANSACTION_COST, FACTOR_COLS,
-    FACTOR_WEIGHTS, PERIODS_PER_YEAR, TRAIN_START, TRAIN_END, VALID_START, VALID_END
-)
+    FACTOR_WEIGHTS, PERIODS_PER_YEAR, TRAIN_START, TRAIN_END, VALID_START, VALID_END,
+    LEDGER_DIR, RUN_BASELINE)
 from data_loader import load_all_data
 from factor_calc import build_cross_section
 from preprocess import preprocess_factors
@@ -17,6 +17,9 @@ from src.evaluation.layered import layered_returns, single_factor_layered, check
 from fundamental import load_fundamentals
 from valuation import calc_valuation_factors
 from industry import load_industry, neutralize_by_industry
+from ledger import Ledger
+from anomaly import classify_symbol, summarize as anomaly_summary
+from config import RUN_BASELINE, STATUS_FILLED
 
 # ========== 实验开关 ==========
 DIAG_MODE = False                # 是否开启单因子分层及极端值诊断
@@ -24,7 +27,7 @@ RUN_PHASE = 'all'                # 运行阶段：'train', 'valid', 'all'
 USE_INDUSTRY_NEUTRAL = False     # 行业中性化（实测削弱 alpha，默认关闭）
 
 os.makedirs('results', exist_ok=True)
-
+ledger = Ledger()
 
 def diagnose_g5(factor_processed, scored_df, future_rets):
     """诊断最高分位组（G5）表现异常的归因工具"""
@@ -176,6 +179,34 @@ def main():
 
         future_rets = calc_period_return(klines, rb_date, entry_date, exit_date)
 
+        scored = factor_processed.copy()
+        scored['score'] = composite_score(scored)
+        scored = scored.sort_values('score', ascending=False)
+        n = max(1, int(len(scored) * 0.25))
+        long_symbols = scored.head(n)['symbol'].tolist()
+        short_symbols = scored.tail(n)['symbol'].tolist()
+
+        # 账本打点
+        weights = {}
+        for s in long_symbols:  weights[s] = 1.0 / n
+        for s in short_symbols: weights[s] = -1.0 / n
+        prices_entry, prices_exit, status_map = {}, {}, {}
+        for sym in long_symbols + short_symbols:
+            df = klines.get(sym)
+            if df is None:
+                status_map[sym] = "data_error"; continue
+            entry_row = df[df['date'] == entry_date]
+            entry_row = entry_row.iloc[0] if not entry_row.empty else None
+            exit_sub = df[(df['date'] >= entry_date) & (df['date'] <= exit_date)]
+            valid_closes = exit_sub['close'].dropna()
+            valid_closes = valid_closes[valid_closes > 0]
+            prices_entry[sym] = entry_row['open'] if entry_row is not None else float('nan')
+            prices_exit[sym] = valid_closes.iloc[-1] if len(valid_closes) else float('nan')
+            status_map[sym] = classify_symbol(entry_row, valid_closes, future_rets.get(sym))
+        ledger.record_period(rb_date, entry_date, exit_date,
+                             long_symbols, short_symbols, weights,
+                             prices_entry, prices_exit, future_rets, status_map)
+        
         # IC 计算
         temp = factor_processed.copy()
         temp['future_ret'] = temp['symbol'].map(future_rets)
@@ -281,6 +312,14 @@ def main():
     print("\n" + "=" * 50)
     print("多空组合绩效")
     print("=" * 50)
+    ledger.dump()
+    print("\n异常统计：")
+    print(anomaly_summary(f"{LEDGER_DIR}/holdings.csv").to_string(index=False))
+
+    if RUN_BASELINE:
+        from baseline import save_result, compare
+        # 这里需要你把"跑一次回测"封装成函数；当前 main() 是脚本式，建议先手动跑
+        print("基线实验需手动切换 FACTOR_WEIGHTS 后重跑 main.py")
     if ls_records:
         ls_df = pd.DataFrame(ls_records).set_index('date')
         print("\n【毛收益】")

@@ -1,0 +1,8 @@
+{
+    "start_date": "2020-01-01",
+    "end_date": "2025-09-30",
+    "lookback_window": 60,
+    "top_pct": 0.25,
+    "weight_combo": 0.5,
+    "cost_rate": 0.0025
+}

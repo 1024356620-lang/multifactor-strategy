@@ -1,5 +1,14 @@
+# 忽略 Python 缓存
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# 忽略数据快照（太大，且属于本地文件）
 data/
-results/
+output/ledger/
+output/daily_nav/
+experiments_frozen_2025Q4_2026Q3/*_holdings_*.csv
+
+# 忽略系统文件
+.DS_Store
+Thumbs.db
