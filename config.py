@@ -20,7 +20,7 @@ VALID_START = '2023-07-01'
 VALID_END = '2026-09-30'        # 顺延到 2026Q3 结束，确保验证期包含新数据
 
 # 因子列表（与 factor_calc.py 保持一致）
-FACTOR_COLS = ['reversal', 'volatility', 'avg_turn', 'ma_ratio', 'EP']
+FACTOR_COLS = ['reversal', 'volatility', 'avg_turn', 'ma_ratio', 'EP',]
 
 # 因子方向：1 表示越大越好，-1 表示越小越好
 FACTOR_DIRECTION = {
@@ -28,7 +28,7 @@ FACTOR_DIRECTION = {
     'volatility': 1,    
     'avg_turn': 1,      
     'ma_ratio': -1,      
-    'EP': 1,             
+    'EP': 1,        
 }
 
 # 因子合成权重

@@ -16,7 +16,7 @@ def calc_factors_at_date(df, end_date):
     sub = sub.copy()
     sub['ret'] = sub['close'].pct_change()
     
-    reversal = -(sub['close'].iloc[-1] / sub['close'].iloc[-20] - 1)
+    reversal = -(sub['close'].iloc[-1] / sub['close'].iloc[-21] - 1)
     volatility = sub['ret'].iloc[-20:].std() * np.sqrt(252)
     avg_turn = sub['turn'].iloc[-20:].mean()
     
