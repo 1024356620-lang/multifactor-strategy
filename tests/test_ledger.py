@@ -1,10 +1,10 @@
 # tests/test_ledger.py
 import pandas as pd
 import numpy as np
+import pytest
 from ledger import Ledger
 from config import (
     STATUS_FILLED, STATUS_UNFILLED_SUSPENDED, STATUS_NO_VALUATION,
-    COMMISSION_RATE,
 )
 
 
@@ -22,15 +22,17 @@ def test_reconcile_matches():
     assert abs(rec["net_pnl"].iloc[0] - (gross - rec["total_cost"].iloc[0])) < 1e-9
 
 
-def test_no_valuation_not_zero():
+def test_no_valuation_raises_error():
+    """测试：一旦出现缺估值，必须明确报错并停止生成绩效指标，严禁静默算作零收益。"""
     lg = Ledger()
     lg.record_period("2025-09-30", "2025-10-01", "2025-12-31",
                      ["000003"], [], {"000003": 0.5},
                      {"000003": 10.0}, {"000003": float("nan")},
                      {"000003": float("nan")},
                      {"000003": "no_valuation"})
-    rec = lg.reconcile()
-    assert rec["n_no_valuation"].iloc[0] == 1
+    
+    with pytest.raises(ValueError, match="致命错误：发现 1 条缺估值持仓"):
+        lg.reconcile()
 
 
 def test_unfilled_not_counted():
