@@ -41,12 +41,14 @@ def build_intervals(all_dates, start, end):
 
 def calc_lowvol(df, end_date, window=60):
     sub = df[df["date"] <= pd.to_datetime(end_date)].tail(window + 1)
+    # 严格校验：必须有至少 61 个价格观测（即 60 个收益率）
     if len(sub) < window + 1: 
-        if len(sub) > 20:
-            return sub["close"].pct_change().dropna().std() * np.sqrt(252)
         return 99.0
+    
     rets = sub["close"].pct_change().dropna()
-    if len(rets) < 10: return 99.0
+    if len(rets) < window: 
+        return 99.0
+        
     return rets.std() * np.sqrt(252)
 
 def main():
@@ -63,7 +65,12 @@ def main():
     
     print(f"=== 调仓期数: {len(intervals)} ===")
 
-    lgs = {"market_equal": Ledger(), "current_2f": Ledger(), "lowvol_only": Ledger(), "combo_50_50": Ledger()}
+    lgs = {
+        "market_equal": Ledger(commission_rate=CONFIG["cost_rate"]),
+        "current_2f": Ledger(commission_rate=CONFIG["cost_rate"]),
+        "lowvol_only": Ledger(commission_rate=CONFIG["cost_rate"]),
+        "combo_50_50": Ledger(commission_rate=CONFIG["cost_rate"])
+    }
 
     for it in intervals:
         rb, entry, exit_ = it["signal_date"], it["entry_date"], it["exit_date"]
@@ -112,27 +119,34 @@ def main():
         for s in syms_lv: w_cb[s] = w_cb.get(s, 0.0) + (1 - w_combo) / n_lv
         syms_cb = list(w_cb.keys())
 
-        def rec(lg, weights, syms):
+        def rec(name, lg, weights, syms):
             pe, px, st, fr = {}, {}, {}, {}
             for sym in syms:
                 df = klines.get(sym)
-                if df is None: st[sym] = "data_error"; continue
+                if df is None: 
+                    st[sym] = "data_error"; 
+                    continue
                 er = df[df["date"] == entry].iloc[0] if not df[df["date"] == entry].empty else None
                 es = df[(df["date"] >= entry) & (df["date"] <= exit_)]
                 vc = es["close"].dropna()
                 vc = vc[vc > 0]
+                
                 p0 = er["open"] if er is not None and pd.notna(er["open"]) and er["open"] > 0 else np.nan
                 p1 = vc.iloc[-1] if len(vc) else np.nan
                 pe[sym], px[sym] = p0, p1
-                if pd.isna(p0): st[sym] = "unfilled"; fr[sym] = np.nan
-                elif pd.isna(p1): st[sym] = "no_val"; fr[sym] = np.nan
-                else: st[sym] = "filled"; fr[sym] = p1 / p0 - 1
+                
+                if pd.isna(p0): 
+                    st[sym] = "unfilled_suspended"; fr[sym] = np.nan
+                elif pd.isna(p1): 
+                    st[sym] = "no_valuation"; fr[sym] = np.nan
+                else: 
+                    st[sym] = "filled"; fr[sym] = p1 / p0 - 1
             lg.record_period(rb, entry, exit_, syms, [], weights, pe, px, fr, st)
 
-        rec(lgs["market_equal"], w_m, syms_m)
-        rec(lgs["current_2f"], w_2f, syms_2f)
-        rec(lgs["lowvol_only"], w_lv, syms_lv)
-        rec(lgs["combo_50_50"], w_cb, syms_cb)
+        rec("market_equal", lgs["market_equal"], w_m, syms_m)
+        rec("current_2f", lgs["current_2f"], w_2f, syms_2f)
+        rec("lowvol_only", lgs["lowvol_only"], w_lv, syms_lv)
+        rec("combo_50_50", lgs["combo_50_50"], w_cb, syms_cb)
 
     summary = []
     for name, lg in lgs.items():
@@ -146,7 +160,6 @@ def main():
         summary.append({"scheme": name, "n_periods": len(net), "net_cum": cum_ret, "sharpe_q": sharpe, "max_dd": max_dd})
 
     df = pd.DataFrame(summary)
-    # 修改了输出的 CSV 名称
     df.to_csv(f"{EXP_DIR}/dev_summary.csv", index=False)
     print("\n=== 开发期测试 ===")
     print(df.to_string(index=False))

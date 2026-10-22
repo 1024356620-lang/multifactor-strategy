@@ -6,23 +6,25 @@
 - 每条持仓：entry_date 建仓，exit_date 平仓。
 - 多头：buy → sell；空头：sell → buy_to_cover。
 - 开仓金额 = abs(target_weight)，平仓金额 = abs(target_weight) × (1 + ret)。
-  平仓金额按"名义金额随价格变化"计算，更接近真实成交额。
-- 费用：开仓 + 平仓各计一次，按金额 × COMMISSION_RATE。
+- 费用：开仓 + 平仓各计一次，按金额 × 传入的费率计算。
 """
 import os
 import pandas as pd
 import numpy as np
 from config import (
-    LEDGER_DIR, COMMISSION_RATE, STAMP_TAX_RATE, SLIPPAGE_BPS,
+    LEDGER_DIR, 
     STATUS_FILLED, STATUS_UNFILLED_SUSPENDED, STATUS_HELD_SUSPENDED,
     STATUS_DATA_ERROR, STATUS_NO_VALUATION,
 )
 
 
 class Ledger:
-    def __init__(self):
-        self.rows = []      # 每期每只股票一行（持仓记录）
-        self.trades = []    # 每笔交易一行（开仓 + 平仓）
+    def __init__(self, commission_rate=0.0025, stamp_tax_rate=0.0, slippage_bps=0):
+        self.rows = []
+        self.trades = []
+        self.commission_rate = commission_rate
+        self.stamp_tax_rate = stamp_tax_rate
+        self.slippage_bps = slippage_bps
 
     def record_period(self, signal_date, entry_date, exit_date,
                       long_symbols, short_symbols, weights,
@@ -35,10 +37,12 @@ class Ledger:
                 p0 = prices_entry.get(sym, np.nan)
                 p1 = prices_exit.get(sym, np.nan)
                 ret = future_rets.get(sym, np.nan)
+                
                 if status == STATUS_NO_VALUATION:
                     pnl = np.nan
                 else:
                     pnl = w * ret if pd.notna(ret) else 0.0
+                    
                 row = {
                     "signal_date": signal_date, "entry_date": entry_date,
                     "exit_date": exit_date, "symbol": sym, "side": side,
@@ -49,7 +53,6 @@ class Ledger:
 
                 # ===== 2. 每条持仓生成一对开平仓交易 =====
                 if status != STATUS_FILLED:
-                    # 未成交 / 无估值 / 数据错误：不记交易
                     continue
                 if pd.isna(p0) or pd.isna(p1):
                     continue
@@ -62,9 +65,9 @@ class Ledger:
                     "symbol": sym, "side": side, "direction": open_dir,
                     "trade_type": "open",
                     "price": p0, "amount": open_amount,
-                    "commission": open_amount * COMMISSION_RATE,
-                    "stamp_tax": open_amount * STAMP_TAX_RATE if open_dir == "sell" else 0.0,
-                    "slippage": open_amount * SLIPPAGE_BPS / 10000.0,
+                    "commission": open_amount * self.commission_rate,
+                    "stamp_tax": open_amount * self.stamp_tax_rate if open_dir == "sell" else 0.0,
+                    "slippage": open_amount * self.slippage_bps / 10000.0
                 })
 
                 # 平仓：金额按名义金额随价格变化
@@ -76,9 +79,9 @@ class Ledger:
                     "symbol": sym, "side": side, "direction": close_dir,
                     "trade_type": "close",
                     "price": p1, "amount": close_amount,
-                    "commission": close_amount * COMMISSION_RATE,
-                    "stamp_tax": close_amount * STAMP_TAX_RATE if close_dir == "sell" else 0.0,
-                    "slippage": close_amount * SLIPPAGE_BPS / 10000.0,
+                    "commission": close_amount * self.commission_rate,
+                    "stamp_tax": close_amount * self.stamp_tax_rate if close_dir == "sell" else 0.0,
+                    "slippage": close_amount * self.slippage_bps / 10000.0,
                 })
 
     def reconcile(self):
@@ -88,16 +91,17 @@ class Ledger:
         trades = pd.DataFrame(self.trades) if self.trades else pd.DataFrame()
         out = []
         for sd, g in df.groupby("signal_date"):
+            # 注意：如果某只股票 no_valuation，它的 pnl_contrib 是 NaN，sum() 会跳过
             gross = g["pnl_contrib"].sum()
             t = trades[trades["signal_date"] == sd] if not trades.empty else pd.DataFrame()
             cost = (t["commission"].sum() + t["stamp_tax"].sum() + t["slippage"].sum()) if not t.empty else 0.0
+            
             out.append({
                 "signal_date": sd, "gross_pnl": gross, "total_cost": cost,
                 "net_pnl": gross - cost,
                 "n_positions": len(g),
                 "n_no_valuation": (g["status"] == STATUS_NO_VALUATION).sum(),
                 "n_unfilled": (g["status"] == STATUS_UNFILLED_SUSPENDED).sum(),
-                "n_close_no_price": 0,   # 新模型下不再产生
             })
         return pd.DataFrame(out)
 

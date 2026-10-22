@@ -42,11 +42,10 @@ def build_intervals(all_dates, start, end):
 def calc_lowvol(df, end_date, window=60):
     sub = df[df["date"] <= pd.to_datetime(end_date)].tail(window + 1)
     if len(sub) < window + 1: 
-        if len(sub) > 20:
-            return sub["close"].pct_change().dropna().std() * np.sqrt(252)
         return 99.0
     rets = sub["close"].pct_change().dropna()
-    if len(rets) < 10: return 99.0
+    if len(rets) < window: 
+        return 99.0
     return rets.std() * np.sqrt(252)
 
 def main():
@@ -63,7 +62,11 @@ def main():
     
     print(f"=== 冻结测试调仓期数: {len(intervals)} ===")
 
-    lgs = {"market_equal": Ledger(), "lowvol_only": Ledger(), "combo_50_50": Ledger()}
+    lgs = {
+        "market_equal": Ledger(commission_rate=CONFIG["cost_rate"]),
+        "lowvol_only": Ledger(commission_rate=CONFIG["cost_rate"]),
+        "combo_50_50": Ledger(commission_rate=CONFIG["cost_rate"])
+    }
 
     for it in intervals:
         rb, entry, exit_ = it["signal_date"], it["entry_date"], it["exit_date"]
@@ -115,17 +118,24 @@ def main():
             pe, px, st, fr = {}, {}, {}, {}
             for sym in syms:
                 df = klines.get(sym)
-                if df is None: st[sym] = "data_error"; continue
+                if df is None: 
+                    st[sym] = "data_error"; 
+                    continue
                 er = df[df["date"] == entry].iloc[0] if not df[df["date"] == entry].empty else None
                 es = df[(df["date"] >= entry) & (df["date"] <= exit_)]
                 vc = es["close"].dropna()
                 vc = vc[vc > 0]
+                
                 p0 = er["open"] if er is not None and pd.notna(er["open"]) and er["open"] > 0 else np.nan
                 p1 = vc.iloc[-1] if len(vc) else np.nan
                 pe[sym], px[sym] = p0, p1
-                if pd.isna(p0): st[sym] = "unfilled"; fr[sym] = np.nan
-                elif pd.isna(p1): st[sym] = "no_val"; fr[sym] = np.nan
-                else: st[sym] = "filled"; fr[sym] = p1 / p0 - 1
+                
+                if pd.isna(p0): 
+                    st[sym] = "unfilled_suspended"; fr[sym] = np.nan
+                elif pd.isna(p1): 
+                    st[sym] = "no_valuation"; fr[sym] = np.nan
+                else: 
+                    st[sym] = "filled"; fr[sym] = p1 / p0 - 1
             lg.record_period(rb, entry, exit_, syms, [], weights, pe, px, fr, st)
             # 保存持仓明细
             pd.DataFrame(lg.rows).to_csv(f"{EXP_DIR}/{name}_holdings_{rb.date()}.csv", index=False)
